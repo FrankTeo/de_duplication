@@ -1,0 +1,379 @@
+
+
+/********************************************************************
+copyright (C), 1995-2004, Si-Tech Information Technology Ltd. 
+file_name: oracall.pc  
+author: 张凡 version: （V1.00） date: （2004－08－20）
+description: oracall 数据库操作
+others:
+history: 1.date: 修改时间 version: 版本（V1.00）author: 作者
+			modification: 修改内容
+		 2. ... 
+********************************************************************/
+
+
+#include "ddef.h"
+
+
+EXEC SQL INCLUDE sqlca;
+EXEC SQL INCLUDE oraca;
+EXEC ORACLE OPTION (ORACA=YES);
+
+/************************************************************
+function: SqlError
+description: 错误处理函数。
+input:
+output:
+return:
+others:
+***********************************************************/
+
+void  SqlError( )
+{
+	MyLog( INFO_SOURCE_DB, INFO_LEVEL_WARN, "sqlcode = [%d]\n", sqlca.sqlcode );
+	MyLog( INFO_SOURCE_DB, INFO_LEVEL_WARN, "sqlca %.*s\n", sqlca.sqlerrm.sqlerrml, sqlca.sqlerrm.sqlerrmc );
+	MyLog( INFO_SOURCE_DB, INFO_LEVEL_WARN, "oraca %.*s\n", oraca.orastxt.orastxtl, oraca.orastxt.orastxtc );
+	MyLog( INFO_SOURCE_DB, INFO_LEVEL_WARN, "on line %d of %.*s\n\n",oraca.oraslnr, oraca.orasfnm.orasfnml, oraca.orasfnm.orasfnmc );
+	
+	EXEC SQL WHENEVER SqlError CONTINUE;
+	EXEC SQL ROLLBACK RELEASE;
+	
+	MyLog( INFO_SOURCE_DB, INFO_LEVEL_EXIT, "数据库操作失败, 系统退出运行!\n\n" );
+}
+
+/************************************************************
+function: ConnectDataBase
+description: 建立数据库连接
+input: szUserName: 用户名
+	   szPassWord: 密码
+	   szServer: 数据库服务名
+output:
+return:
+others:
+***********************************************************/
+
+void ConnectDataBase( char * szUserName, char * szPassWord, char * szServer )
+{
+	char szLoginCmd[128];
+	
+	EXEC SQL WHENEVER SqlError DO SqlError();
+	
+	memset( szLoginCmd, 0, sizeof( szLoginCmd ) );
+	
+	sprintf( szLoginCmd, "%s/%s@%s", szUserName, szPassWord, szServer );
+
+	EXEC SQL CONNECT : szLoginCmd;
+}
+
+/************************************************************
+function: DisConnectDataBase
+description: 断开数据库连接
+input:
+output:
+return:
+others:
+***********************************************************/
+
+void DisConnectDataBase()
+{
+	EXEC SQL ROLLBACK WORK RELEASE;
+}
+
+/************************************************************
+function: GetCount
+description: 获取指定表的记录数
+input: szSqlStr: sql语句
+output:
+return: 记录数
+others:
+***********************************************************/
+
+int GetCount( char * szSqlStr )
+{
+	long lCount;
+	int nLoop;
+	
+	lCount = -1;
+	
+	EXEC SQL PREPARE sqlCount FROM :szSqlStr;
+	EXEC SQL DECLARE curCount CURSOR FOR sqlCount;
+	EXEC SQL OPEN curCount;
+	EXEC SQL WHENEVER NOT FOUND DO break;
+	
+	for( nLoop = 0 ;  ; nLoop++ )
+	{
+		EXEC SQL FETCH curCount INTO lCount;
+	}
+
+	EXEC SQL CLOSE curCount;
+	
+	return lCount;
+}
+
+/************************************************************
+function: GetIndexCtrlInfo
+description: 获取 index_control_table 中的记录
+input: piData: 描述系统全局结构的结构体
+output:
+return: MY_SUCCEED: 成功, 失败退出
+others:
+***********************************************************/
+
+int GetIndexCtrlInfo( PINDEX_DATA piData )
+{
+	PICTRL_DATA picData;
+	PICTRL_RECORD picRecord;
+	char szSqlStr[2056];
+	
+	char szIndexType[8 + 1];
+	char szIndexFlag[1 + 1];
+	char szIndexDir[128 + 1];
+	char szEffectStartTime[8 + 1];
+	char szEffectEndTime[8 + 1];
+	char szIndexStartTime[8 + 1];
+	char szIndexEndTime[8 + 1];
+	char szBlockLink[8 + 1];
+	
+	int nLoop;
+	
+	picData = &(piData->icData);
+	
+	memset( szSqlStr, 0, sizeof( szSqlStr ) );
+
+	sprintf( szSqlStr, "select count(*) from index_control_table where host_name = '%s'", piData->szHostName );
+
+	picData->nRecCount = GetCount( szSqlStr );
+	if( 0 >= picData->nRecCount )
+	{
+		MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "index_control_table 记录数为 %d !\n", picData->nRecCount );
+		return MY_FAIL;
+	}
+	
+	picData->picRecord = (PICTRL_RECORD) malloc( picData->nRecCount * sizeof( ICTRL_RECORD ) );
+	if( NULL == picData->picRecord )
+	{
+		MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "申请保存 index_control_table 记录的内存空间失败!\n" );
+		return MY_FAIL;
+	}
+	memset( picData->picRecord, 0, picData->nRecCount * sizeof( ICTRL_RECORD ) );
+	
+	memset( szSqlStr, 0, sizeof( szSqlStr ) );
+
+	sprintf( szSqlStr, "select index_type, index_flag, index_dir, \
+								effect_starttime, effect_endtime, index_starttime, index_endtime, \
+								block_link from index_control_table where host_name = '%s' \
+								order by index_type, effect_starttime, effect_endtime, \
+								index_starttime, index_endtime, block_link", piData->szHostName );
+
+	picRecord = picData->picRecord;
+	
+	EXEC SQL PREPARE  sqlIndex FROM :szSqlStr;
+	EXEC SQL DECLARE  curIndex CURSOR FOR sqlIndex;
+	EXEC SQL OPEN  curIndex;
+	EXEC SQL WHENEVER NOT FOUND DO break;
+	
+	for( nLoop = 0 ;  ; nLoop++, picRecord++ )
+	{
+		memset( szIndexType, 0, sizeof( szIndexType ) );
+		memset( szIndexFlag, 0, sizeof( szIndexFlag ) );
+		memset( szIndexDir, 0, sizeof( szIndexDir ) );
+		memset( szEffectStartTime, 0, sizeof( szEffectStartTime ) );
+		memset( szEffectEndTime, 0, sizeof( szEffectEndTime ) );
+		memset( szIndexStartTime, 0, sizeof( szIndexStartTime ) );
+		memset( szIndexEndTime, 0, sizeof( szIndexEndTime ) );
+		memset( szBlockLink, 0, sizeof( szBlockLink ) );
+	
+		EXEC SQL FETCH curIndex INTO :szIndexType, :szIndexFlag, :szIndexDir, :szEffectStartTime, :szEffectEndTime, :szIndexStartTime, :szIndexEndTime, :szBlockLink;
+		
+		TrimLeft( TrimRight( szIndexType ) );
+		TrimLeft( TrimRight( szIndexFlag ) );
+		TrimLeft( TrimRight( szIndexDir ) );
+		TrimLeft( TrimRight( szEffectStartTime ) );
+		TrimLeft( TrimRight( szEffectEndTime ) );
+		TrimLeft( TrimRight( szIndexStartTime ) );
+		TrimLeft( TrimRight( szIndexEndTime ) );
+		TrimLeft( TrimRight( szBlockLink ) );
+		
+		strcpy( picRecord->szIndexType, szIndexType );
+		strcpy( picRecord->szIndexFlag, szIndexFlag );
+		strcpy( picRecord->szIndexDir, szIndexDir );
+		strcpy( picRecord->szEffectStartTime, szEffectStartTime );
+		strcpy( picRecord->szEffectEndTime, szEffectEndTime );
+		strcpy( picRecord->szIndexStartTime, szIndexStartTime );
+		strcpy( picRecord->szIndexEndTime, szIndexEndTime );
+		strcpy( picRecord->szBlockLink, szBlockLink );
+	}
+	
+	EXEC SQL CLOSE curIndex;
+
+	if( nLoop > picData->nRecCount )
+	{
+		MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "从 index_control_table 中获取的记录数 [%d] 与预定义记录数 [%d] 不符!\n", nLoop, picData->nRecCount );
+		return MY_FAIL;
+	}
+	
+	/* DebugOutIndexControlInfo( picData ); */
+	
+	return MY_SUCCEED;
+}
+
+/************************************************************
+function: GetBlockCtrlInfo
+description: 获取 block_control_table 中的记录
+input: piData: 描述系统全局结构的结构体
+output:
+return: MY_SUCCEED: 成功, 失败退出
+others:
+***********************************************************/
+
+int GetBlockCtrlInfo( PINDEX_DATA piData )
+{
+	PBCTRL_DATA pbcData;
+	PBCTRL_RECORD pbcRecord;
+	char szSqlStr[2056];
+	
+	char szIndexType[16 + 1];
+	char szBlockLink[8 + 1];
+	char szBlockFlag[1 + 1];
+	char szBlockStartTime[8 + 1];
+	char szBlockEndTime[8 + 1];
+	char szBlockUnit[1 + 1];
+	
+	int nBlockNum;
+	int nBlockSize;
+	
+	int nLoop;
+	
+	pbcData = &(piData->bcData);
+	
+	memset( szSqlStr, 0, sizeof( szSqlStr ) );
+
+	sprintf( szSqlStr, "select count(*) from block_control_table where index_type in \
+							( select index_type from index_control_table where host_name = '%s' )", piData->szHostName );
+	
+	pbcData->nRecCount = GetCount( szSqlStr );
+	if( 0 >= pbcData->nRecCount )
+	{
+		MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "block_control_table 记录数为 %d !\n", pbcData->nRecCount );
+		return MY_FAIL;
+	}
+	
+	pbcData->pbcRecord = (PBCTRL_RECORD) malloc( pbcData->nRecCount * sizeof( BCTRL_RECORD ) );
+	if( NULL == pbcData->pbcRecord )
+	{
+		MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "申请保存 block_control_table 记录的内存空间失败!\n" );
+		return MY_FAIL;
+	}
+	memset( pbcData->pbcRecord, 0, pbcData->nRecCount * sizeof( BCTRL_RECORD ) );
+	
+	memset( szSqlStr, 0, sizeof( szSqlStr ) );
+
+	sprintf( szSqlStr, "select index_type, block_link, block_flag, block_starttime, block_endtime, \
+							block_unit,	block_num, block_size from block_control_table where index_type in \
+							( select index_type from index_control_table where host_name = '%s' ) \
+							order by index_type, block_link, block_starttime, block_endtime", piData->szHostName );
+
+	pbcRecord = pbcData->pbcRecord;
+	
+	EXEC SQL PREPARE  sqlBlock  FROM :szSqlStr;
+	EXEC SQL DECLARE  curBlock CURSOR FOR sqlBlock;
+	EXEC SQL OPEN  curBlock;
+	EXEC SQL WHENEVER NOT FOUND DO break;
+	
+	for( nLoop = 0 ;  ; nLoop++, pbcRecord++ )
+	{
+		memset( szIndexType, 0, sizeof( szIndexType ) );
+		memset( szBlockLink, 0, sizeof( szBlockLink ) );
+		memset( szBlockFlag, 0, sizeof( szBlockFlag ) );
+		memset( szBlockStartTime, 0, sizeof( szBlockStartTime ) );
+		memset( szBlockEndTime, 0, sizeof( szBlockEndTime ) );
+		memset( szBlockUnit, 0, sizeof( szBlockUnit ) );
+	
+		EXEC SQL FETCH curBlock INTO :szIndexType, :szBlockLink, :szBlockFlag, :szBlockStartTime, :szBlockEndTime, :szBlockUnit, :nBlockNum, :nBlockSize;
+		
+		TrimLeft( TrimRight( szIndexType ) );
+		TrimLeft( TrimRight( szBlockLink ) );
+		TrimLeft( TrimRight( szBlockFlag ) );
+		TrimLeft( TrimRight( szBlockStartTime ) );
+		TrimLeft( TrimRight( szBlockEndTime ) );
+		TrimLeft( TrimRight( szBlockUnit ) );
+
+		strcpy( pbcRecord->szIndexType, szIndexType );
+		strcpy( pbcRecord->szBlockLink, szBlockLink );
+		strcpy( pbcRecord->szBlockFlag, szBlockFlag );
+		strcpy( pbcRecord->szBlockStartTime, szBlockStartTime );
+		strcpy( pbcRecord->szBlockEndTime, szBlockEndTime );
+		strcpy( pbcRecord->szBlockUnit, szBlockUnit );
+		
+		pbcRecord->nBlockNum = nBlockNum;
+		pbcRecord->nBlockSize = nBlockSize;
+		
+		if( 0 >= pbcRecord->nBlockNum )
+		{
+			MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "BlockNum [%d] 无效!\n", pbcRecord->nBlockNum );
+			return MY_FAIL;
+		}
+		
+		if( atoi( pbcRecord->szBlockEndTime ) < atoi( pbcRecord->szBlockStartTime ) )
+		{
+			MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "EndTime 小于 StartTime!\n", pbcRecord->nBlockNum );
+			return MY_FAIL;
+		}
+	}
+	
+	EXEC SQL CLOSE curBlock;
+
+	if( nLoop > pbcData->nRecCount )
+	{
+		MyLog( INFO_SOURCE_APP, INFO_LEVEL_WARN, "从 blcok_control_table 中获取的记录数 [%d] 与预定义记录数 [%d] 不符!\n", nLoop, pbcData->nRecCount );
+		return MY_FAIL;
+	}
+	
+	/* DebugOutBlockControlInfo( pbcData ); */
+	
+	return MY_SUCCEED;
+}
+
+/************************************************************
+function: GetProcCtrlFlag
+description: 获取系统运行控制标志
+input: szCtrlFlag: 运行控制标志
+output:
+return: 控制标志
+others:
+***********************************************************/
+
+int GetProcCtrlFlag( char * szCtrlFlag )
+{
+	char szSqlStr[2056];
+	char szFlag[16 + 1];
+	int nLoop;
+		
+	memset( szSqlStr, 0, sizeof( szSqlStr ) );
+	memset( szFlag, 0, sizeof( szFlag ) );
+	
+	sprintf( szSqlStr, "select operator_id from sys_proc where program_name = '%s'", szCtrlFlag );
+
+	EXEC SQL PREPARE sqlCtrl FROM :szSqlStr;
+	EXEC SQL DECLARE curCtrl CURSOR FOR sqlCtrl;
+	EXEC SQL OPEN curCtrl;
+	EXEC SQL WHENEVER NOT FOUND DO break;
+	
+	for( nLoop = 0 ;  ; nLoop++ )
+	{
+		EXEC SQL FETCH curCtrl INTO :szFlag;
+	}
+
+	EXEC SQL CLOSE curCtrl;
+
+	if( NULL == *(szFlag ) )
+	{
+		MyLog( INFO_SOURCE_APP, INFO_LEVEL_GEN, "进程控制标志 %s 未在进程控制表 sys_proc 中定制!\n\n", szCtrlFlag );
+		return PROC_CTRL_EXIT;
+	}
+	else
+	{
+		return atoi( szFlag );
+	}
+}
+ 
